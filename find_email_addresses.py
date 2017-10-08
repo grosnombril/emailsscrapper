@@ -2,7 +2,7 @@
 import sys
 import urllib2
 import re
-import bs4
+
 import requests
 
 # stealing from Django
@@ -17,7 +17,51 @@ def is_valid_url(url):
         r'(?:/?|[/?]\S+)$', re.IGNORECASE)
     return url is not None and regex.search(url)
 
-# from StackOverflow 
+# extract emails from html and validate them
+def find_emails(html):
+    import bs4
+    soup = bs4.BeautifulSoup(html, "html.parser")
+    emails = soup.select('a[href^=mailto]')
+    foundEmails = []
+
+    for email in emails:
+        # check against regular expression in case BeautifulSoup is wrong
+        emailResult = re.findall('[a-zA-Z0-9+_\-\.]+@[0-9a-zA-Z][.-0-9a-zA-Z]*.[a-zA-Z]+', str(email))
+        if len(emailResult) == 0:
+            continue
+        email = emailResult[0]
+        # strip email tags down to the email
+        if "?" in email:
+            email = email.split("?")[0]
+        # if email does not match the domain we drop it
+        if not domain in email:
+            continue
+        foundEmails.append(email)
+    return foundEmails
+
+def find_urls(html):
+    import bs4
+    soup = bs4.BeautifulSoup(html, "html.parser")
+    urls = [link['href'] for link in soup('a') if 'href' in link.attrs]
+    foundUrls = []
+
+    for url in urls:
+        if url.startswith("//"):
+            url = "http:" + url
+        if "//" + originalUrl not in url:
+            continue
+        if not is_valid_url(url):
+            continue
+        if "?" in url:
+            url = url.split("?")[0]
+        if "#" in url:
+            url = url.split("#")[0]
+        if url.endswith(('.pdf', '.mov', '.ram')):
+            continue
+        foundUrls.append(url)
+    return foundUrls
+
+# from StackOverflow
 class NoRedirectHandler(urllib2.HTTPRedirectHandler):
     def http_error_302(self, req, fp, code, msg, headers):
         infourl = urllib2.addinfourl(fp, headers, req.get_full_url())
@@ -35,12 +79,10 @@ if not originalUrl.startswith('http'):
 else:
     startingUrl = originalUrl
 
-# keep track of found URLs, and those that need to be processed in separated list
 foundUrls = []
 queuedUrls = [startingUrl]
-
-# this is what we return
 foundEmails = []
+urlExceptions = []
 
 opener = urllib2.build_opener(NoRedirectHandler())
 urllib2.install_opener(opener)
@@ -52,59 +94,34 @@ while (len(queuedUrls)):
     myUrl = queuedUrls.pop()
     try:
         response = session.get(myUrl)
-    # To handle server errors
     except requests.exceptions.ConnectionError:
+        urlExceptions.append(myUrl)
         continue
-    # To handle too many redirects (301 to 302 to 301...)
     except requests.exceptions.TooManyRedirects:
+        urlExceptions.append(myUrl)
         continue
 
+    # skip if it redirects to another domain
     for h in response.history:
         if not originalUrl in h.url:
             continue
     html = response.text
 
-    # use BeautifulSoup to do the parsing for us
-    soup = bs4.BeautifulSoup(html, "html.parser")
-    urls = [link['href'] for link in soup('a') if 'href' in link.attrs]
-    emails = soup.select('a[href^=mailto]')
-
+    emails = find_emails(html)
     for email in emails:
-        # different formats for emails, let's parse it
-        emailResult = re.findall('[a-zA-Z0-9+_\-\.]+@[0-9a-zA-Z][.-0-9a-zA-Z]*.[a-zA-Z]+', str(email))
-        # just in case beautifulsoup is wrong
-        if len(emailResult) == 0:
-            continue
-        email = emailResult[0]
-        # reduce to email only
-        if "?" in email:
-            email = email.split("?")[0]
-        # we are only interested by our domain
-        if not domain in email:
-            continue
-        # let's avoid duplicates
         if not email in foundEmails:
             foundEmails.append(email)
+
+    urls = find_urls(html)
     for url in urls:
-        if url.startswith("//"):
-            url = "http:" + url
-        if "//" + originalUrl not in url:
-            continue
-        if not is_valid_url(url):
-            continue
-        if "?" in url:
-            url = url.split("?")[0]
-        if "#" in url:
-            url = url.split("#")[0]
-        # parse common files type that are not html
-        if url.endswith(('.pdf', '.mov', '.ram')):
-            continue
-        # add newly found urls to lists
         if not url in foundUrls:
             foundUrls.append(url)
             queuedUrls.append(url)
 
-
 print 'Found these email addresses:'
 for email in foundEmails:
     print email
+if len(urlExceptions)>0:
+    print 'We had problems loading the following URLs:'
+    for urlException in urlExceptions:
+        print urlException
